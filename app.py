@@ -8,8 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
+from supabase import create_client, Client
 
-app = FastAPI(title="MarkItDown + Graphify MCP Server")
+app = FastAPI(title="MarkItDown + Graphify + Supabase MCP")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,6 +21,14 @@ app.add_middleware(
 )
 
 md = MarkItDown()
+
+# Inicialització de Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase: Client = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- MOCK D'AUTENTICACIÓ OAUTH ---
 @app.get("/authorize")
@@ -101,7 +110,7 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                     },
                     {
                         "name": "analitzar_repositori_graphify",
-                        "description": "Clona un repositori GitHub public i genera un mapa estructural/graf de coneixement utilitzant Graphify.",
+                        "description": "Clona un repositori GitHub, genera el graf mitjançant AST (--code-only) i el guarda a Supabase.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -135,13 +144,20 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
                     
-                    # Executa la CLI de Graphify
-                    subprocess.run(["graphify", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
+                    # Executa Graphify amb --code-only per evitar requerir API keys d'LLM
+                    subprocess.run(["graphify", "--code-only", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
                     
                     report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
                     if os.path.exists(report_path):
                         with open(report_path, "r", encoding="utf-8") as f:
                             content = f.read()
+                            
+                        # Desa el graf a Supabase
+                        if supabase:
+                            supabase.table("graphify_memory").insert({
+                                "repo_url": repo_url,
+                                "report_content": content
+                            }).execute()
                     else:
                         content = "S'ha analitzat el repositori, pero Graphify no ha generat l'arxiu GRAPH_REPORT.md."
             except subprocess.CalledProcessError as e:
@@ -149,6 +165,19 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
             except Exception as e:
                 content = f"Error d'execucio: {str(e)}"
                 
+        # Registra l'ús de tokens i activitat a Supabase
+        if supabase and content:
+            try:
+                chars = len(content)
+                est_tokens = int(chars / 4)
+                supabase.table("mcp_tool_usage").insert({
+                    "tool_name": tool_name,
+                    "char_count": chars,
+                    "estimated_tokens": est_tokens
+                }).execute()
+            except Exception:
+                pass
+
         if msg_id is not None:
             response = {
                 "jsonrpc": "2.0",
