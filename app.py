@@ -110,7 +110,7 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                     },
                     {
                         "name": "analitzar_repositori_graphify",
-                        "description": "Clona un repositori GitHub, genera el graf mitjançant AST (--code-only) i el guarda a Supabase.",
+                        "description": "Clona un repositori GitHub, genera el graf amb Graphify i el guarda a Supabase.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -144,8 +144,8 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
                     
-                    # Executa Graphify amb --code-only per evitar requerir API keys d'LLM
-                    subprocess.run(["graphify", "--code-only", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
+                    # Executa Graphify sense modificadors addicionals
+                    subprocess.run(["graphify", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
                     
                     report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
                     if os.path.exists(report_path):
