@@ -2,12 +2,14 @@ import json
 import asyncio
 import urllib.request
 import tempfile
+import subprocess
+import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 
-app = FastAPI(title="MarkItDown MCP Server")
+app = FastAPI(title="MarkItDown + Graphify MCP Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +46,6 @@ async def sse_endpoint(request: Request):
     clients[client_id] = queue
 
     async def event_generator():
-        # Negociació inicial de l'MCP: indica on enviar els missatges
         yield f"event: endpoint\ndata: /messages?client_id={client_id}\n\n"
         try:
             while True:
@@ -70,7 +71,6 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
 
     response = None
     
-    # 1. Inicialització del servidor MCP
     if method == "initialize":
         response = {
             "jsonrpc": "2.0",
@@ -78,11 +78,10 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "markitdown-server", "version": "1.0.0"}
+                "serverInfo": {"name": "mcp-unificat", "version": "1.0.0"}
             }
         }
     
-    # 2. Llista d'eines disponibles
     elif method == "tools/list":
         response = {
             "jsonrpc": "2.0",
@@ -95,25 +94,34 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "url": {"type": "string", "description": "URL publica del document (PDF, DOCX, etc.)"}
+                                "url": {"type": "string", "description": "URL publica del document"}
                             },
                             "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "analitzar_repositori_graphify",
+                        "description": "Clona un repositori GitHub public i genera un mapa estructural/graf de coneixement utilitzant Graphify.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_url": {"type": "string", "description": "Enllac HTTP del repositori a analitzar (ex: https://github.com/usuari/repo)"}
+                            },
+                            "required": ["repo_url"]
                         }
                     }
                 ]
             }
         }
         
-    # 3. Execució de l'eina per part de Claude
     elif method == "tools/call":
         tool_name = body.get("params", {}).get("name")
         args = body.get("params", {}).get("arguments", {})
+        content = ""
         
         if tool_name == "convert_url_to_markdown":
             url = args.get("url")
-            content = ""
             try:
-                # Descarrega el document a un fitxer temporal i el converteix
                 with tempfile.NamedTemporaryFile(delete=False) as tmp:
                     urllib.request.urlretrieve(url, tmp.name)
                     result = md.convert(tmp.name)
@@ -121,6 +129,27 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
             except Exception as e:
                 content = f"Error convertint el document: {str(e)}"
                 
+        elif tool_name == "analitzar_repositori_graphify":
+            repo_url = args.get("repo_url")
+            try:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
+                    
+                    # Executa la CLI de Graphify
+                    subprocess.run(["graphify", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
+                    
+                    report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
+                    if os.path.exists(report_path):
+                        with open(report_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                    else:
+                        content = "S'ha analitzat el repositori, pero Graphify no ha generat l'arxiu GRAPH_REPORT.md."
+            except subprocess.CalledProcessError as e:
+                content = f"Error de comanda: {e.stderr.decode('utf-8', errors='ignore')}"
+            except Exception as e:
+                content = f"Error d'execucio: {str(e)}"
+                
+        if msg_id is not None:
             response = {
                 "jsonrpc": "2.0",
                 "id": msg_id,
@@ -129,7 +158,6 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                 }
             }
 
-    # Envia la resposta al canal SSE obert per Claude
     if response and msg_id is not None:
         await clients[client_id].put(json.dumps(response))
 
