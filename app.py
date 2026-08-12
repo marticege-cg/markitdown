@@ -114,7 +114,7 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "repo_url": {"type": "string", "description": "Enllac HTTP del repositori a analitzar (ex: https://github.com/usuari/repo)"}
+                                "repo_url": {"type": "string", "description": "Enllac HTTP del repositori a analitzar"}
                             },
                             "required": ["repo_url"]
                         }
@@ -144,39 +144,36 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
                     
-                    # Executa Graphify sense modificadors addicionals
-                    subprocess.run(["graphify", tmp_dir], check=True, cwd=tmp_dir, capture_output=True)
+                    # Executa Graphify
+                    res = subprocess.run(["graphify", tmp_dir], capture_output=True, text=True)
                     
                     report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
-                    if os.path.exists(report_path):
+                    if res.returncode == 0 and os.path.exists(report_path):
                         with open(report_path, "r", encoding="utf-8") as f:
                             content = f.read()
                             
-                        # Desa el graf a Supabase
+                        # Desa el graf a Supabase si tot va bé
                         if supabase:
                             supabase.table("graphify_memory").insert({
                                 "repo_url": repo_url,
                                 "report_content": content
                             }).execute()
                     else:
-                        content = "S'ha analitzat el repositori, pero Graphify no ha generat l'arxiu GRAPH_REPORT.md."
-            except subprocess.CalledProcessError as e:
-                content = f"Error de comanda: {e.stderr.decode('utf-8', errors='ignore')}"
+                        # Si Graphify falla, guardem el missatge d'error
+                        error_detail = res.stderr.strip() if res.stderr else "Error desconegut o report no generat"
+                        content = f"Error executant Graphify: {error_detail}"
             except Exception as e:
                 content = f"Error d'execucio: {str(e)}"
                 
-        # Registra l'ús de tokens i activitat a Supabase
+        # Registra SEMPRE l'ús a Supabase (independentment de si ha fallat o tingut èxit)
         if supabase and content:
-            try:
-                chars = len(content)
-                est_tokens = int(chars / 4)
-                supabase.table("mcp_tool_usage").insert({
-                    "tool_name": tool_name,
-                    "char_count": chars,
-                    "estimated_tokens": est_tokens
-                }).execute()
-            except Exception:
-                pass
+            chars = len(content)
+            est_tokens = int(chars / 4)
+            supabase.table("mcp_tool_usage").insert({
+                "tool_name": tool_name,
+                "char_count": chars,
+                "estimated_tokens": est_tokens
+            }).execute()
 
         if msg_id is not None:
             response = {
