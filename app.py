@@ -4,7 +4,7 @@ import urllib.request
 import tempfile
 import subprocess
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
@@ -29,6 +29,38 @@ supabase: Client = None
 
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- TASCA EN SEGON PLA PER EVITAR TIMEOUTS ---
+def processar_graphify_background(repo_url: str):
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
+            res = subprocess.run(["graphify", tmp_dir], capture_output=True, text=True)
+            
+            report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
+            content = ""
+            if res.returncode == 0 and os.path.exists(report_path):
+                with open(report_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            else:
+                content = f"Error Graphify: {res.stderr.strip() if res.stderr else 'Report no generat'}"
+                
+            # Desa a Supabase de manera persistent
+            if supabase:
+                supabase.table("graphify_memory").insert({
+                    "repo_url": repo_url,
+                    "report_content": content
+                }).execute()
+                
+                chars = len(content)
+                est_tokens = int(chars / 4)
+                supabase.table("mcp_tool_usage").insert({
+                    "tool_name": "analitzar_repositori_graphify",
+                    "char_count": chars,
+                    "estimated_tokens": est_tokens
+                }).execute()
+    except Exception as e:
+        print(f"Error en segon pla: {str(e)}")
 
 # --- MOCK D'AUTENTICACIÓ OAUTH ---
 @app.get("/authorize")
@@ -70,7 +102,7 @@ async def sse_endpoint(request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/messages")
-async def messages_endpoint(request: Request, client_id: str = "claude_user"):
+async def messages_endpoint(request: Request, background_tasks: BackgroundTasks, client_id: str = "claude_user"):
     if client_id not in clients:
         return JSONResponse({"error": "Unknown client"}, status_code=400)
 
@@ -110,7 +142,7 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                     },
                     {
                         "name": "analitzar_repositori_graphify",
-                        "description": "Clona un repositori GitHub, genera el graf amb Graphify i el guarda a Supabase.",
+                        "description": "Clona un repositori GitHub i l'analitza en segon pla desant-lo a Supabase.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -140,40 +172,9 @@ async def messages_endpoint(request: Request, client_id: str = "claude_user"):
                 
         elif tool_name == "analitzar_repositori_graphify":
             repo_url = args.get("repo_url")
-            try:
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    subprocess.run(["git", "clone", repo_url, tmp_dir], check=True, capture_output=True)
-                    
-                    # Executa Graphify
-                    res = subprocess.run(["graphify", tmp_dir], capture_output=True, text=True)
-                    
-                    report_path = os.path.join(tmp_dir, "graphify-out", "GRAPH_REPORT.md")
-                    if res.returncode == 0 and os.path.exists(report_path):
-                        with open(report_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-                            
-                        # Desa el graf a Supabase si tot va bé
-                        if supabase:
-                            supabase.table("graphify_memory").insert({
-                                "repo_url": repo_url,
-                                "report_content": content
-                            }).execute()
-                    else:
-                        # Si Graphify falla, guardem el missatge d'error
-                        error_detail = res.stderr.strip() if res.stderr else "Error desconegut o report no generat"
-                        content = f"Error executant Graphify: {error_detail}"
-            except Exception as e:
-                content = f"Error d'execucio: {str(e)}"
-                
-        # Registra SEMPRE l'ús a Supabase (independentment de si ha fallat o tingut èxit)
-        if supabase and content:
-            chars = len(content)
-            est_tokens = int(chars / 4)
-            supabase.table("mcp_tool_usage").insert({
-                "tool_name": tool_name,
-                "char_count": chars,
-                "estimated_tokens": est_tokens
-            }).execute()
+            # Llança la tasca en segon pla i respon a Claude instantàniament
+            background_tasks.add_task(processar_graphify_background, repo_url)
+            content = f"L'anàlisi de {repo_url} s'ha posat en marxa en segon pla. Un cop finalitzi, s'emmagatzemarà automàticament a Supabase."
 
         if msg_id is not None:
             response = {
